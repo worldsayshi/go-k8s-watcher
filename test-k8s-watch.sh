@@ -229,9 +229,6 @@ EOF
 modify_resources() {
   print_header "Modifying Resources to Generate Events"
 
-  echo "Waiting 5 seconds before making changes..."
-  sleep 5
-
   # Update a ConfigMap
   echo "Updating ConfigMap..."
   kubectl patch configmap test-config-1 -n test-ns-1 --type=merge -p '{"data":{"key1":"updated-value1","new-key":"new-value"}}'
@@ -244,7 +241,7 @@ modify_resources() {
 
   # Update a Custom Resource
   echo "Updating Custom Resource..."
-  kubectl patch app test-app -n test-ns-1 --type=merge -p '{"spec":{"appVersion":"1.0.1","replicas":4}}' --subresource=status
+  kubectl patch app test-app -n test-ns-1 --type=merge -p '{"spec":{"appVersion":"1.0.1","replicas":4}}'
   print_success "Updated Custom Resource"
 
   # Delete a resource
