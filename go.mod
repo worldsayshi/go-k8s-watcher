@@ -1,4 +1,4 @@
-module github.com/worldsayshi/go-k8s-watch
+module github.com/worldsayshi/go-k8s-watcher
 
 go 1.24.0
 
