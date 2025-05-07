@@ -150,11 +150,25 @@ func main() {
 	if *watchAll {
 		// Discover all resources in the cluster
 		fmt.Println("Discovering all available resources...")
-		apiGroups, _, err := discoveryClient.ServerGroupsAndResources()
+		apiGroups, resourceLists, err := discoveryClient.ServerGroupsAndResources()
 		if err != nil {
-			log.Fatalf("Error getting server resources: %v", err)
+			// This error is expected and normal - the discovery API returns a partial result
+			if !discovery.IsGroupDiscoveryFailedError(err) {
+				log.Fatalf("Error getting server resources: %v", err)
+			} else {
+				log.Printf("Warning: Some API groups couldn't be discovered: %v", err)
+			}
 		}
 
+		// Track resources we've already added to avoid duplicates
+		processedResources := make(map[string]bool)
+
+		// Process the resources we got directly
+		for _, resList := range resourceLists {
+			processResourceList(resList, &resourcesToWatch, processedResources)
+		}
+
+		// Also check each API group's preferred version
 		for _, apiGroup := range apiGroups {
 			groupVersion := apiGroup.PreferredVersion.GroupVersion
 			resources, err := discoveryClient.ServerResourcesForGroupVersion(groupVersion)
@@ -163,29 +177,10 @@ func main() {
 				continue
 			}
 
-			for _, r := range resources.APIResources {
-				// Skip subresources like pods/log or deployments/scale
-				if len(r.Group) == 0 && r.Version == "" {
-					r.Group = resources.GroupVersion
-					if !contains(r.Verbs, "watch") || strings.Contains(r.Name, "/") {
-						continue
-					}
-				}
-
-				parts := splitAPIVersion(resources.GroupVersion)
-				group, version := parts[0], parts[1]
-				apiVersion := resources.GroupVersion
-				if group == "" {
-					apiVersion = version // core API has no group prefix
-				}
-
-				resourcesToWatch = append(resourcesToWatch, ResourceToWatch{
-					Kind:       r.Kind,
-					APIVersion: apiVersion,
-					Namespaced: r.Namespaced,
-				})
-			}
+			processResourceList(resources, &resourcesToWatch, processedResources)
 		}
+
+		log.Printf("Discovered %d watchable resources", len(resourcesToWatch))
 	} else if *resourceKind != "" && *apiVersion != "" {
 		// Watch specific resource type
 		namespaced := true // Default to namespaced resources
@@ -285,10 +280,16 @@ func watchResourceType(ctx context.Context, client dynamic.Interface, mapper *re
 			})
 
 			if err != nil {
-				log.Printf("Error watching %s: %v", watchStr, err)
-				cancel()
-				time.Sleep(5 * time.Second)
-				continue
+				if strings.Contains(err.Error(), "could not find the requested resource") {
+					// Resource isn't actually available in the cluster, log once and stop trying
+					log.Printf("Resource %s isn't available in this cluster, skipping", watchStr)
+					return // Exit the goroutine entirely
+				} else {
+					log.Printf("Error watching %s: %v", watchStr, err)
+					cancel()
+					time.Sleep(5 * time.Second)
+					continue
+				}
 			}
 
 			ch := watcher.ResultChan()
@@ -443,6 +444,42 @@ func toLowerCamelCase(s string) string {
 		return s
 	}
 	return string(s[0]) + s[1:]
+}
+
+// Helper function to process a resource list and extract watchable resources
+func processResourceList(resList *metav1.APIResourceList, resourcesToWatch *[]ResourceToWatch, processed map[string]bool) {
+	for _, r := range resList.APIResources {
+		// Skip resources we can't watch
+		if !contains(r.Verbs, "watch") {
+			continue
+		}
+
+		// Skip subresources (containing '/')
+		if strings.Contains(r.Name, "/") {
+			continue
+		}
+
+		// Create a unique key for this resource to avoid duplicates
+		resourceKey := fmt.Sprintf("%s/%s/%s", resList.GroupVersion, r.Kind, r.Name)
+		if processed[resourceKey] {
+			continue
+		}
+
+		processed[resourceKey] = true
+
+		parts := splitAPIVersion(resList.GroupVersion)
+		group, version := parts[0], parts[1]
+		apiVersion := resList.GroupVersion
+		if group == "" {
+			apiVersion = version // core API has no group prefix
+		}
+
+		*resourcesToWatch = append(*resourcesToWatch, ResourceToWatch{
+			Kind:       r.Kind,
+			APIVersion: apiVersion,
+			Namespaced: r.Namespaced,
+		})
+	}
 }
 
 // Helper function to get the host IP address for WSL
