@@ -300,6 +300,16 @@ cleanup() {
 main() {
   check_prerequisites
   create_cluster
+
+  # Pause to allow starting the watcher in another terminal
+  print_header "Cluster Ready - Pause Before Creating Resources"
+  echo -e "${YELLOW}The Kind cluster is now ready. You can start the resource watcher in another terminal:${NC}"
+  echo -e "${GREEN}go run . --namespace=test-ns-1${NC}"
+  echo -e "${GREEN}# or to watch everything:${NC}"
+  echo -e "${GREEN}go run . --all --all-namespaces${NC}"
+  echo
+  read -p "Press Enter when you're ready to continue and create test resources..."
+
   create_test_resources
   show_examples
 

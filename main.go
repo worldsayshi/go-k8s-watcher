@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -38,6 +39,7 @@ import (
 	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
+	"k8s.io/utils/ptr"
 )
 
 // ResourceToWatch represents a Kubernetes resource to watch
@@ -271,9 +273,20 @@ func watchResourceType(ctx context.Context, client dynamic.Interface, mapper *re
 
 	go func() {
 		for {
-			watcher, err := resourceInterface.Watch(ctx, metav1.ListOptions{})
+			// Store last seen resource versions to help detect changes
+			resourceVersions := make(map[string]string)
+
+			// Use a timeout context for the watch to ensure it refreshes periodically
+			watchCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+
+			// Create a watcher with a short timeout to ensure connection doesn't hang indefinitely
+			watcher, err := resourceInterface.Watch(watchCtx, metav1.ListOptions{
+				TimeoutSeconds: ptr.To(int64(3600)), // 1 hour timeout on the server side
+			})
+
 			if err != nil {
 				log.Printf("Error watching %s: %v", watchStr, err)
+				cancel()
 				time.Sleep(5 * time.Second)
 				continue
 			}
@@ -293,24 +306,63 @@ func watchResourceType(ctx context.Context, client dynamic.Interface, mapper *re
 				objNamespace, _, _ := unstructured.NestedString(obj.Object, "metadata", "namespace")
 				resourceVersion, _, _ := unstructured.NestedString(obj.Object, "metadata", "resourceVersion")
 
+				// Create a key for this resource
+				resourceKey := fmt.Sprintf("%s/%s", objNamespace, objName)
+
+				// Get spec content for debugging
+				specContent := "<no spec>"
+				if spec, found, _ := unstructured.NestedMap(obj.Object, "spec"); found {
+					specContentBytes, _ := json.Marshal(spec)
+					if len(specContentBytes) <= 200 {
+						specContent = string(specContentBytes)
+					} else {
+						specContent = string(specContentBytes[:200]) + "... (truncated)"
+					}
+				}
+
 				// Output based on event type
 				switch event.Type {
 				case watch.Added:
-					log.Printf("[ADDED] %s: %s, Namespace: %s, ResourceVersion: %s",
-						watchStr, objName, objNamespace, resourceVersion)
+					log.Printf("[ADDED] %s: %s, Namespace: %s, ResourceVersion: %s, Spec: %s",
+						watchStr, objName, objNamespace, resourceVersion, specContent)
+					resourceVersions[resourceKey] = resourceVersion
+
 				case watch.Modified:
-					log.Printf("[MODIFIED] %s: %s, Namespace: %s, ResourceVersion: %s",
-						watchStr, objName, objNamespace, resourceVersion)
+					oldRV := resourceVersions[resourceKey]
+					if oldRV == resourceVersion {
+						log.Printf("[MODIFIED-NO-CHANGE] %s: %s, Namespace: %s, ResourceVersion unchanged: %s",
+							watchStr, objName, objNamespace, resourceVersion)
+					} else {
+						log.Printf("[MODIFIED] %s: %s, Namespace: %s, ResourceVersion: %s -> %s, Spec: %s",
+							watchStr, objName, objNamespace, oldRV, resourceVersion, specContent)
+						resourceVersions[resourceKey] = resourceVersion
+					}
+
 				case watch.Deleted:
-					log.Printf("[DELETED] %s: %s, Namespace: %s",
-						watchStr, objName, objNamespace)
+					log.Printf("[DELETED] %s: %s, Namespace: %s, Final ResourceVersion: %s",
+						watchStr, objName, objNamespace, resourceVersion)
+					delete(resourceVersions, resourceKey)
+
 				case watch.Error:
-					log.Printf("[ERROR] %s: %s, Namespace: %s",
-						watchStr, objName, objNamespace)
+					status, ok := event.Object.(*metav1.Status)
+					if ok {
+						log.Printf("[ERROR] %s: %s, Code: %d, Reason: %s",
+							watchStr, objName, status.Code, status.Reason)
+					} else {
+						log.Printf("[ERROR] %s: %s, Namespace: %s, Unknown error object", watchStr, objName, objNamespace)
+					}
+				}
+
+				// Debug log for specific objects being modified
+				if event.Type == watch.Modified && (strings.Contains(objName, "nginx") ||
+					strings.Contains(objName, "test-app") ||
+					strings.Contains(objName, "test-config")) {
+					log.Printf("[DEBUG] Detected change to watched object: %s/%s", objNamespace, objName)
 				}
 			}
 
 			log.Printf("Watcher channel closed for %s, restarting...", watchStr)
+			cancel() // Clean up the context
 			time.Sleep(1 * time.Second)
 		}
 	}()
