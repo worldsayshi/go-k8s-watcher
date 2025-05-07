@@ -23,7 +23,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"path/filepath"
+	"net"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -47,12 +48,13 @@ type ResourceToWatch struct {
 }
 
 func main() {
-	// Set up Kubernetes client configuration
-	var kubeconfig *string
+	// Set up command line flags
+	var kubeconfigFlag *string
 	if home := homedir.HomeDir(); home != "" {
-		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "path to the kubeconfig file")
+		// Use $KUBECONFIG environment variable if set, otherwise default to ~/.kube/config
+		kubeconfigFlag = flag.String("kubeconfig", "", "path to the kubeconfig file (overrides $KUBECONFIG and default)")
 	} else {
-		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
+		kubeconfigFlag = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
 	}
 
 	namespace := flag.String("namespace", "default", "namespace to watch (for namespaced resources)")
@@ -60,14 +62,46 @@ func main() {
 	resourceKind := flag.String("kind", "", "specific resource kind to watch (e.g., Pod, Deployment)")
 	apiVersion := flag.String("api-version", "", "API version of the resource (e.g., v1, apps/v1)")
 	allNamespaces := flag.Bool("all-namespaces", false, "watch resources across all namespaces")
+	// useInClusterConfig := flag.Bool("in-cluster", false, "use in-cluster config when running inside a pod")
 
 	flag.Parse()
 
-	// Build the config from the path
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	// Build configuration from kubeconfig
+	fmt.Println("Loading Kubernetes configuration...")
+
+	// Handle kubeconfig path priority:
+	// 1. --kubeconfig flag (highest priority)
+	// 2. KUBECONFIG environment variable
+	// 3. Default ~/.kube/config path
+	configLoadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if *kubeconfigFlag != "" {
+		// If explicit flag is provided, use only that
+		configLoadingRules.ExplicitPath = *kubeconfigFlag
+	}
+
+	// The loading rules will automatically read from $KUBECONFIG if set
+	// or fall back to ~/.kube/config if not specified
+
+	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		configLoadingRules,
+		&clientcmd.ConfigOverrides{})
+
+	// Get the resulting kubeconfig
+	config, err := clientConfig.ClientConfig()
 	if err != nil {
 		log.Fatalf("Error building kubeconfig: %v", err)
 	}
+
+	// Log which kubeconfig is being used
+	rawConfig, err := clientConfig.RawConfig()
+	if err == nil {
+		currentContext := rawConfig.CurrentContext
+		if currentCtx, ok := rawConfig.Contexts[currentContext]; ok {
+			log.Printf("Using kubeconfig context: %s (cluster: %s)", currentContext, currentCtx.Cluster)
+		}
+	}
+
+	log.Printf("Connecting to Kubernetes API server at: %s", config.Host)
 
 	// Create dynamic client
 	dynamicClient, err := dynamic.NewForConfig(config)
@@ -79,6 +113,26 @@ func main() {
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
 	if err != nil {
 		log.Fatalf("Error creating discovery client: %v", err)
+	}
+
+	// Verify connection to API server with timeout
+	verifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		_, err = discoveryClient.ServerVersion()
+		if err != nil {
+			log.Printf("Warning: Could not connect to Kubernetes API server: %v", err)
+			log.Printf("Ensure your Kubernetes cluster is running and accessible.")
+		} else {
+			log.Printf("Successfully connected to Kubernetes API server at %s", config.Host)
+		}
+		cancel()
+	}()
+
+	<-verifyCtx.Done()
+	if verifyCtx.Err() == context.DeadlineExceeded {
+		log.Printf("Warning: Kubernetes API server connection timed out. Continuing anyway...")
 	}
 
 	// Create a RESTMapper to map resources to their API paths
@@ -337,4 +391,41 @@ func toLowerCamelCase(s string) string {
 		return s
 	}
 	return string(s[0]) + s[1:]
+}
+
+// Helper function to get the host IP address for WSL
+func getHostIP() string {
+	// For WSL, we need to get the Windows host IP
+	// First try to get the IP from /etc/resolv.conf (WSL2)
+	cmd := exec.Command("bash", "-c", "grep nameserver /etc/resolv.conf | cut -d' ' -f2 | head -n 1")
+	out, err := cmd.Output()
+	if err == nil && len(out) > 0 {
+		ip := strings.TrimSpace(string(out))
+		if ip != "127.0.0.1" && ip != "::1" {
+			log.Printf("Found WSL2 host IP from resolv.conf: %s", ip)
+			return ip
+		}
+	}
+
+	// Try to get the host.docker.internal via DNS lookup
+	ips, err := net.LookupHost("host.docker.internal")
+	if err == nil && len(ips) > 0 {
+		log.Printf("Found host.docker.internal IP: %s", ips[0])
+		return ips[0]
+	}
+
+	// Try the routing table approach (alternative for WSL1)
+	cmd = exec.Command("bash", "-c", "ip route show | grep default | awk '{print $3}'")
+	out, err = cmd.Output()
+	if err == nil && len(out) > 0 {
+		ip := strings.TrimSpace(string(out))
+		if ip != "" {
+			log.Printf("Found default gateway IP from routing table: %s", ip)
+			return ip
+		}
+	}
+
+	// As a last resort, try a common Docker Desktop port forwarding IP
+	log.Printf("Could not determine Windows host IP from WSL. Using default Docker Desktop IP 127.0.0.1")
+	return "127.0.0.1"
 }
