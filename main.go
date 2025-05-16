@@ -23,7 +23,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/worldsayshi/go-k8s-watch/pkg/watcher"
+	"github.com/worldsayshi/go-k8s-watcher/pkg/watcher"
 	"k8s.io/apimachinery/pkg/watch"
 )
 
