@@ -9,12 +9,6 @@
 // - Monitor specific namespaces or across all namespaces
 // - Automatically discover available resources in the cluster
 // - Reconnect automatically if connection is lost
-//
-// Usage:
-//   go run main.go                                        # Watch default resources in default namespace
-//   go run main.go --all --all-namespaces                 # Watch all resources across all namespaces
-//   go run main.go --kind=Pod --api-version=v1            # Watch only pods
-//   go run main.go --kind=Deployment --api-version=apps/v1 --namespace=kube-system # Watch deployments in kube-system
 
 package main
 
@@ -24,497 +18,176 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
-	"os/exec"
+	"os"
+	"os/signal"
 	"strings"
-	"time"
+	"syscall"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	"github.com/worldsayshi/go-k8s-watch/pkg/watcher"
 	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/discovery/cached/memory"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/restmapper"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/homedir"
-	"k8s.io/utils/ptr"
 )
 
-// ResourceToWatch represents a Kubernetes resource to watch
-type ResourceToWatch struct {
-	Kind       string
-	APIVersion string
-	Namespaced bool
-}
-
 func main() {
-	// Set up command line flags
-	var kubeconfigFlag *string
-	if home := homedir.HomeDir(); home != "" {
-		// Use $KUBECONFIG environment variable if set, otherwise default to ~/.kube/config
-		kubeconfigFlag = flag.String("kubeconfig", "", "path to the kubeconfig file (overrides $KUBECONFIG and default)")
-	} else {
-		kubeconfigFlag = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
-	}
-
+	// Parse command line arguments
 	namespace := flag.String("namespace", "default", "namespace to watch (for namespaced resources)")
 	watchAll := flag.Bool("all", false, "watch all available resources")
 	resourceKind := flag.String("kind", "", "specific resource kind to watch (e.g., Pod, Deployment)")
 	apiVersion := flag.String("api-version", "", "API version of the resource (e.g., v1, apps/v1)")
 	allNamespaces := flag.Bool("all-namespaces", false, "watch resources across all namespaces")
-	// useInClusterConfig := flag.Bool("in-cluster", false, "use in-cluster config when running inside a pod")
+	kubeconfigPath := flag.String("kubeconfig", "", "path to the kubeconfig file")
 
 	flag.Parse()
 
-	// Build configuration from kubeconfig
-	fmt.Println("Loading Kubernetes configuration...")
-
-	// Handle kubeconfig path priority:
-	// 1. --kubeconfig flag (highest priority)
-	// 2. KUBECONFIG environment variable
-	// 3. Default ~/.kube/config path
-	configLoadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if *kubeconfigFlag != "" {
-		// If explicit flag is provided, use only that
-		configLoadingRules.ExplicitPath = *kubeconfigFlag
+	// Set up the watcher options
+	opts := watcher.Options{
+		KubeconfigPath: *kubeconfigPath,
+		WatchAll:       *watchAll,
 	}
 
-	// The loading rules will automatically read from $KUBECONFIG if set
-	// or fall back to ~/.kube/config if not specified
-
-	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		configLoadingRules,
-		&clientcmd.ConfigOverrides{})
-
-	// Get the resulting kubeconfig
-	config, err := clientConfig.ClientConfig()
-	if err != nil {
-		log.Fatalf("Error building kubeconfig: %v", err)
+	// Determine namespace to watch
+	if *allNamespaces {
+		opts.Namespace = "" // Empty string means all namespaces
+	} else {
+		opts.Namespace = *namespace
 	}
 
-	// Log which kubeconfig is being used
-	rawConfig, err := clientConfig.RawConfig()
-	if err == nil {
-		currentContext := rawConfig.CurrentContext
-		if currentCtx, ok := rawConfig.Contexts[currentContext]; ok {
-			log.Printf("Using kubeconfig context: %s (cluster: %s)", currentContext, currentCtx.Cluster)
+	// If specific resource is requested
+	if *resourceKind != "" && *apiVersion != "" {
+		opts.ResourceTypes = []watcher.ResourceToWatch{
+			{
+				Kind:       *resourceKind,
+				APIVersion: *apiVersion,
+				// Let the watcher determine if resource is namespaced
+				Namespaced: true, // Default value, will be checked by the watcher
+			},
 		}
 	}
 
-	log.Printf("Connecting to Kubernetes API server at: %s", config.Host)
-
-	// Create dynamic client
-	dynamicClient, err := dynamic.NewForConfig(config)
+	// Create a new watcher
+	k8sWatcher, err := watcher.NewWatcher(opts)
 	if err != nil {
-		log.Fatalf("Error creating dynamic client: %v", err)
+		log.Fatalf("Failed to create watcher: %v", err)
 	}
 
-	// Create discovery client for resource information
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
-	if err != nil {
-		log.Fatalf("Error creating discovery client: %v", err)
-	}
-
-	// Verify connection to API server with timeout
-	verifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	go func() {
-		_, err = discoveryClient.ServerVersion()
-		if err != nil {
-			log.Printf("Warning: Could not connect to Kubernetes API server: %v", err)
-			log.Printf("Ensure your Kubernetes cluster is running and accessible.")
-		} else {
-			log.Printf("Successfully connected to Kubernetes API server at %s", config.Host)
-		}
-		cancel()
-	}()
-
-	<-verifyCtx.Done()
-	if verifyCtx.Err() == context.DeadlineExceeded {
-		log.Printf("Warning: Kubernetes API server connection timed out. Continuing anyway...")
-	}
-
-	// Create a RESTMapper to map resources to their API paths
-	cachedDiscoveryClient := memory.NewMemCacheClient(discoveryClient)
-	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscoveryClient)
-
+	// Create a context that can be canceled on SIGINT/SIGTERM
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Choose what resources to watch
-	var resourcesToWatch []ResourceToWatch
+	// Handle termination signals
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Println("Received termination signal, shutting down...")
+		cancel()
+	}()
 
-	if *watchAll {
-		// Discover all resources in the cluster
-		fmt.Println("Discovering all available resources...")
-		apiGroups, resourceLists, err := discoveryClient.ServerGroupsAndResources()
-		if err != nil {
-			// This error is expected and normal - the discovery API returns a partial result
-			if !discovery.IsGroupDiscoveryFailedError(err) {
-				log.Fatalf("Error getting server resources: %v", err)
-			} else {
-				log.Printf("Warning: Some API groups couldn't be discovered: %v", err)
-			}
-		}
-
-		// Track resources we've already added to avoid duplicates
-		processedResources := make(map[string]bool)
-
-		// Process the resources we got directly
-		for _, resList := range resourceLists {
-			processResourceList(resList, &resourcesToWatch, processedResources)
-		}
-
-		// Also check each API group's preferred version
-		for _, apiGroup := range apiGroups {
-			groupVersion := apiGroup.PreferredVersion.GroupVersion
-			resources, err := discoveryClient.ServerResourcesForGroupVersion(groupVersion)
-			if err != nil {
-				log.Printf("Error getting resources for group version %s: %v", groupVersion, err)
-				continue
-			}
-
-			processResourceList(resources, &resourcesToWatch, processedResources)
-		}
-
-		log.Printf("Discovered %d watchable resources", len(resourcesToWatch))
-	} else if *resourceKind != "" && *apiVersion != "" {
-		// Watch specific resource type
-		namespaced := true // Default to namespaced resources
-
-		// Try to determine if the resource is namespaced
-		if *apiVersion != "" && *resourceKind != "" {
-			parts := splitAPIVersion(*apiVersion)
-			group, version := parts[0], parts[1]
-
-			gv := schema.GroupVersion{Group: group, Version: version}
-			resources, err := discoveryClient.ServerResourcesForGroupVersion(gv.String())
-			if err == nil {
-				for _, r := range resources.APIResources {
-					if r.Kind == *resourceKind {
-						namespaced = r.Namespaced
-						break
-					}
-				}
-			}
-		}
-
-		resourcesToWatch = append(resourcesToWatch, ResourceToWatch{
-			Kind:       *resourceKind,
-			APIVersion: *apiVersion,
-			Namespaced: namespaced,
-		})
-	} else {
-		// Default to some common resources
-		resourcesToWatch = []ResourceToWatch{
-			{Kind: "Pod", APIVersion: "v1", Namespaced: true},
-			{Kind: "Deployment", APIVersion: "apps/v1", Namespaced: true},
-			{Kind: "Service", APIVersion: "v1", Namespaced: true},
-			{Kind: "ConfigMap", APIVersion: "v1", Namespaced: true},
-			{Kind: "Namespace", APIVersion: "v1", Namespaced: false},
-		}
-	}
-
-	// Determine which namespace(s) to watch
-	watchNamespace := *namespace
+	// Log which namespace we're watching
 	if *allNamespaces {
-		watchNamespace = "" // Empty string means all namespaces
+		fmt.Println("Starting to watch resources across all namespaces")
+	} else {
+		fmt.Printf("Starting to watch resources in namespace: %s\n", *namespace)
 	}
 
-	// Start watching each resource
-	fmt.Printf("Starting to watch resources in namespace: %s\n", watchNamespace)
-	if watchNamespace == "" {
-		fmt.Println("Watching across all namespaces")
-	}
-
-	for _, resource := range resourcesToWatch {
-		watchResourceType(ctx, dynamicClient, restMapper, resource, watchNamespace)
+	// Start the watcher with our event handler
+	if err := k8sWatcher.Start(ctx, eventHandler); err != nil {
+		log.Fatalf("Failed to start watcher: %v", err)
 	}
 
 	fmt.Println("Watchers started. Press Ctrl+C to exit.")
-	select {} // Keep the program running
+
+	// Wait for context to be done (from signal handler)
+	<-ctx.Done()
+
+	// Stop the watcher gracefully
+	k8sWatcher.Stop()
+	fmt.Println("Watcher stopped cleanly")
 }
 
-func watchResourceType(ctx context.Context, client dynamic.Interface, mapper *restmapper.DeferredDiscoveryRESTMapper, resource ResourceToWatch, namespace string) {
-	parts := splitAPIVersion(resource.APIVersion)
-	group, version := parts[0], parts[1]
+// eventHandler processes resource events
+func eventHandler(event watcher.ResourceEvent) {
+	var logMsg string
 
-	// Create a new GVR (GroupVersionResource)
-	gvr := schema.GroupVersionResource{
-		Group:    group,
-		Version:  version,
-		Resource: getResourceNameFromKind(resource.Kind),
-	}
-
-	// Determine if we should watch a specific namespace or all namespaces
-	var resourceInterface dynamic.ResourceInterface
-	if resource.Namespaced && namespace != "" {
-		resourceInterface = client.Resource(gvr).Namespace(namespace)
+	// Create a resource string for display
+	resourceStr := event.Resource.Kind
+	if group, version := watcher.SplitAPIVersion(event.Resource.APIVersion); group != "" {
+		resourceStr = fmt.Sprintf("%s.%s/%s", resourceStr, group, version)
 	} else {
-		resourceInterface = client.Resource(gvr)
+		resourceStr = fmt.Sprintf("%s/%s", resourceStr, version)
 	}
 
-	watchStr := resource.Kind
-	if group != "" {
-		watchStr = fmt.Sprintf("%s.%s/%s", watchStr, group, version)
-	} else {
-		watchStr = fmt.Sprintf("%s/%s", watchStr, version)
-	}
+	// Format based on event type
+	switch event.Type {
+	case watch.Added:
+		logMsg = fmt.Sprintf("[ADDED] %s: %s, Namespace: %s, ResourceVersion: %s",
+			resourceStr, event.Name, event.Namespace, event.ResourceVersion)
 
-	fmt.Printf("Starting watcher for: %s\n", watchStr)
-
-	go func() {
-		for {
-			// Store last seen resource versions to help detect changes
-			resourceVersions := make(map[string]string)
-
-			// Use a timeout context for the watch to ensure it refreshes periodically
-			watchCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-
-			// Create a watcher with a short timeout to ensure connection doesn't hang indefinitely
-			watcher, err := resourceInterface.Watch(watchCtx, metav1.ListOptions{
-				TimeoutSeconds: ptr.To(int64(3600)), // 1 hour timeout on the server side
-			})
-
-			if err != nil {
-				if strings.Contains(err.Error(), "could not find the requested resource") {
-					// Resource isn't actually available in the cluster, log once and stop trying
-					log.Printf("Resource %s isn't available in this cluster, skipping", watchStr)
-					return // Exit the goroutine entirely
-				} else {
-					log.Printf("Error watching %s: %v", watchStr, err)
-					cancel()
-					time.Sleep(5 * time.Second)
-					continue
-				}
+		// Add condensed spec info if available
+		if spec, found := getSpecFromObject(event.Object); found && len(spec) > 0 {
+			if len(spec) > 200 {
+				spec = spec[:200] + "... (truncated)"
 			}
+			logMsg += fmt.Sprintf(", Spec: %s", spec)
+		}
 
-			ch := watcher.ResultChan()
-			log.Printf("Watcher started for %s", watchStr)
+	case watch.Modified:
+		if event.PreviousResourceVersion == event.ResourceVersion {
+			logMsg = fmt.Sprintf("[MODIFIED-NO-CHANGE] %s: %s, Namespace: %s, ResourceVersion unchanged: %s",
+				resourceStr, event.Name, event.Namespace, event.ResourceVersion)
+		} else {
+			logMsg = fmt.Sprintf("[MODIFIED] %s: %s, Namespace: %s, ResourceVersion: %s -> %s",
+				resourceStr, event.Name, event.Namespace, event.PreviousResourceVersion, event.ResourceVersion)
 
-			for event := range ch {
-				obj, ok := event.Object.(*unstructured.Unstructured)
-				if !ok {
-					log.Printf("Unexpected object type: %T", event.Object)
-					continue
+			// Add condensed spec info if available
+			if spec, found := getSpecFromObject(event.Object); found && len(spec) > 0 {
+				if len(spec) > 200 {
+					spec = spec[:200] + "... (truncated)"
 				}
-
-				// Extract metadata
-				objName, _, _ := unstructured.NestedString(obj.Object, "metadata", "name")
-				objNamespace, _, _ := unstructured.NestedString(obj.Object, "metadata", "namespace")
-				resourceVersion, _, _ := unstructured.NestedString(obj.Object, "metadata", "resourceVersion")
-
-				// Create a key for this resource
-				resourceKey := fmt.Sprintf("%s/%s", objNamespace, objName)
-
-				// Get spec content for debugging
-				specContent := "<no spec>"
-				if spec, found, _ := unstructured.NestedMap(obj.Object, "spec"); found {
-					specContentBytes, _ := json.Marshal(spec)
-					if len(specContentBytes) <= 200 {
-						specContent = string(specContentBytes)
-					} else {
-						specContent = string(specContentBytes[:200]) + "... (truncated)"
-					}
-				}
-
-				// Output based on event type
-				switch event.Type {
-				case watch.Added:
-					log.Printf("[ADDED] %s: %s, Namespace: %s, ResourceVersion: %s, Spec: %s",
-						watchStr, objName, objNamespace, resourceVersion, specContent)
-					resourceVersions[resourceKey] = resourceVersion
-
-				case watch.Modified:
-					oldRV := resourceVersions[resourceKey]
-					if oldRV == resourceVersion {
-						log.Printf("[MODIFIED-NO-CHANGE] %s: %s, Namespace: %s, ResourceVersion unchanged: %s",
-							watchStr, objName, objNamespace, resourceVersion)
-					} else {
-						log.Printf("[MODIFIED] %s: %s, Namespace: %s, ResourceVersion: %s -> %s, Spec: %s",
-							watchStr, objName, objNamespace, oldRV, resourceVersion, specContent)
-						resourceVersions[resourceKey] = resourceVersion
-					}
-
-				case watch.Deleted:
-					log.Printf("[DELETED] %s: %s, Namespace: %s, Final ResourceVersion: %s",
-						watchStr, objName, objNamespace, resourceVersion)
-					delete(resourceVersions, resourceKey)
-
-				case watch.Error:
-					status, ok := event.Object.(*metav1.Status)
-					if ok {
-						log.Printf("[ERROR] %s: %s, Code: %d, Reason: %s",
-							watchStr, objName, status.Code, status.Reason)
-					} else {
-						log.Printf("[ERROR] %s: %s, Namespace: %s, Unknown error object", watchStr, objName, objNamespace)
-					}
-				}
-
-				// Debug log for specific objects being modified
-				if event.Type == watch.Modified && (strings.Contains(objName, "nginx") ||
-					strings.Contains(objName, "test-app") ||
-					strings.Contains(objName, "test-config")) {
-					log.Printf("[DEBUG] Detected change to watched object: %s/%s", objNamespace, objName)
-				}
+				logMsg += fmt.Sprintf(", Spec: %s", spec)
 			}
-
-			log.Printf("Watcher channel closed for %s, restarting...", watchStr)
-			cancel() // Clean up the context
-			time.Sleep(1 * time.Second)
 		}
-	}()
-}
 
-// Helper function to pluralize common Kubernetes resource kinds
-func getResourceNameFromKind(kind string) string {
-	kindToResource := map[string]string{
-		"Pod":                      "pods",
-		"Deployment":               "deployments",
-		"Service":                  "services",
-		"ConfigMap":                "configmaps",
-		"Secret":                   "secrets",
-		"Namespace":                "namespaces",
-		"Node":                     "nodes",
-		"PersistentVolume":         "persistentvolumes",
-		"PersistentVolumeClaim":    "persistentvolumeclaims",
-		"Ingress":                  "ingresses",
-		"Job":                      "jobs",
-		"CronJob":                  "cronjobs",
-		"StatefulSet":              "statefulsets",
-		"DaemonSet":                "daemonsets",
-		"ServiceAccount":           "serviceaccounts",
-		"Role":                     "roles",
-		"RoleBinding":              "rolebindings",
-		"ClusterRole":              "clusterroles",
-		"ClusterRoleBinding":       "clusterrolebindings",
-		"CustomResourceDefinition": "customresourcedefinitions",
-	}
+	case watch.Deleted:
+		logMsg = fmt.Sprintf("[DELETED] %s: %s, Namespace: %s, Final ResourceVersion: %s",
+			resourceStr, event.Name, event.Namespace, event.ResourceVersion)
 
-	if resource, ok := kindToResource[kind]; ok {
-		return resource
-	}
-
-	// For unknown kinds, attempt to make a reasonable guess
-	// Default to lowercase + append "s" for English pluralization
-	return fmt.Sprintf("%ss", toLowerCamelCase(kind))
-}
-
-// Helper function to split API version into group and version
-func splitAPIVersion(apiVersion string) []string {
-	parts := []string{"", ""}
-	if apiVersion == "v1" {
-		// Special case for core API group
-		parts[1] = apiVersion
-	} else if idx := splitBySlash(apiVersion); idx != -1 {
-		parts[0] = apiVersion[:idx]
-		parts[1] = apiVersion[idx+1:]
-	} else {
-		parts[1] = apiVersion
-	}
-	return parts
-}
-
-// Helper function to find the index of '/' in a string
-func splitBySlash(s string) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '/' {
-			return i
+	case watch.Error:
+		if event.Error != nil {
+			logMsg = fmt.Sprintf("[ERROR] %s: %s, Namespace: %s, Error: %v",
+				resourceStr, event.Name, event.Namespace, event.Error)
+		} else {
+			logMsg = fmt.Sprintf("[ERROR] %s: %s, Namespace: %s, Unknown error",
+				resourceStr, event.Name, event.Namespace)
 		}
 	}
-	return -1
-}
 
-// Helper function to check if a string slice contains a value
-func contains(slice []string, s string) bool {
-	for _, item := range slice {
-		if item == s {
-			return true
-		}
-	}
-	return false
-}
+	// Log the event
+	log.Println(logMsg)
 
-// Helper function to convert a string to lowerCamelCase
-func toLowerCamelCase(s string) string {
-	if len(s) == 0 {
-		return s
-	}
-	return string(s[0]) + s[1:]
-}
-
-// Helper function to process a resource list and extract watchable resources
-func processResourceList(resList *metav1.APIResourceList, resourcesToWatch *[]ResourceToWatch, processed map[string]bool) {
-	for _, r := range resList.APIResources {
-		// Skip resources we can't watch
-		if !contains(r.Verbs, "watch") {
-			continue
-		}
-
-		// Skip subresources (containing '/')
-		if strings.Contains(r.Name, "/") {
-			continue
-		}
-
-		// Create a unique key for this resource to avoid duplicates
-		resourceKey := fmt.Sprintf("%s/%s/%s", resList.GroupVersion, r.Kind, r.Name)
-		if processed[resourceKey] {
-			continue
-		}
-
-		processed[resourceKey] = true
-
-		parts := splitAPIVersion(resList.GroupVersion)
-		group, version := parts[0], parts[1]
-		apiVersion := resList.GroupVersion
-		if group == "" {
-			apiVersion = version // core API has no group prefix
-		}
-
-		*resourcesToWatch = append(*resourcesToWatch, ResourceToWatch{
-			Kind:       r.Kind,
-			APIVersion: apiVersion,
-			Namespaced: r.Namespaced,
-		})
+	// Debug extra information for specific objects we're interested in
+	if event.Type == watch.Modified && (contains(event.Name, "nginx") ||
+		contains(event.Name, "test-app") ||
+		contains(event.Name, "test-config")) {
+		log.Printf("[DEBUG] Detected change to watched object: %s/%s", event.Namespace, event.Name)
 	}
 }
 
-// Helper function to get the host IP address for WSL
-func getHostIP() string {
-	// For WSL, we need to get the Windows host IP
-	// First try to get the IP from /etc/resolv.conf (WSL2)
-	cmd := exec.Command("bash", "-c", "grep nameserver /etc/resolv.conf | cut -d' ' -f2 | head -n 1")
-	out, err := cmd.Output()
-	if err == nil && len(out) > 0 {
-		ip := strings.TrimSpace(string(out))
-		if ip != "127.0.0.1" && ip != "::1" {
-			log.Printf("Found WSL2 host IP from resolv.conf: %s", ip)
-			return ip
-		}
+// getSpecFromObject extracts and formats the spec section from an object
+func getSpecFromObject(obj map[string]interface{}) (string, bool) {
+	spec, found := obj["spec"]
+	if !found {
+		return "", false
 	}
 
-	// Try to get the host.docker.internal via DNS lookup
-	ips, err := net.LookupHost("host.docker.internal")
-	if err == nil && len(ips) > 0 {
-		log.Printf("Found host.docker.internal IP: %s", ips[0])
-		return ips[0]
+	specBytes, err := json.Marshal(spec)
+	if err != nil {
+		return "", false
 	}
 
-	// Try the routing table approach (alternative for WSL1)
-	cmd = exec.Command("bash", "-c", "ip route show | grep default | awk '{print $3}'")
-	out, err = cmd.Output()
-	if err == nil && len(out) > 0 {
-		ip := strings.TrimSpace(string(out))
-		if ip != "" {
-			log.Printf("Found default gateway IP from routing table: %s", ip)
-			return ip
-		}
-	}
+	return string(specBytes), true
+}
 
-	// As a last resort, try a common Docker Desktop port forwarding IP
-	log.Printf("Could not determine Windows host IP from WSL. Using default Docker Desktop IP 127.0.0.1")
-	return "127.0.0.1"
+// contains checks if a string contains a substring
+func contains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }
