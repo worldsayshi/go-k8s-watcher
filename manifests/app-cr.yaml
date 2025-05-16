@@ -1,0 +1,8 @@
+apiVersion: example.com/v1
+kind: App
+metadata:
+  name: test-app
+  namespace: test-ns-1
+spec:
+  appVersion: "1.0.0"
+  replicas: 3
