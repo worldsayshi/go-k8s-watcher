@@ -1,4 +1,16 @@
-# Makefile for go-k8s-watcher
+# Makefile.PHONY: help
+help:
+	@echo "Available targets:"
+	@echo "  help           - Show this help message"
+	@echo "  prereqs        - Check prerequisites"
+	@echo "  create-cluster - Create Kind cluster for testing"
+	@echo "  resources      - Create test resources in the cluster"
+	@echo "  modify         - Modify resources to trigger events"
+	@echo "  examples       - Show example commands"
+	@echo "  cleanup        - Delete the Kind cluster"
+	@echo "  start-watcher  - Start the Kubernetes resource watcher"
+	@echo "  test-only      - Run test sequence (resources & modify) without starting watcher"
+	@echo "  e2e-test       - Run end-to-end test with automatic watcher start/stop"-watcher
 # Organizes functionality using external scripts and manifests
 
 # Colors for better output
@@ -50,8 +62,26 @@ cleanup:
 	@echo -e "${BLUE}========== Cleaning up Resources ==========${NC}\n"
 	@./scripts/cleanup.sh
 
-# End-to-end test target that runs the full sequence without interactive prompts
+# Start the Kubernetes resource watcher in the background
+.PHONY: start-watcher
+start-watcher:
+	@echo -e "${BLUE}========== Starting Resource Watcher ==========${NC}\n"
+	@echo -e "${YELLOW}Starting the resource watcher for namespace: test-ns-1${NC}"
+	@go run main.go --all --namespace=test-ns-1
+
+# Run test sequence without starting watcher
+.PHONY: test-only
+test-only: create-cluster
+	@echo -e "${BLUE}========== Running Test Only (No Watcher) ==========${NC}\n"
+	@./scripts/run_e2e_test.sh
+
+# End-to-end test target that runs the full sequence with automatic watcher
 .PHONY: e2e-test
 e2e-test: create-cluster
-	@echo -e "${BLUE}========== Running End-to-End Test ==========${NC}\n"
-	@./scripts/run_e2e_test.sh
+	@echo -e "${BLUE}========== Running End-to-End Test with Watcher ==========${NC}\n"
+	@echo -e "${YELLOW}Starting the resource watcher in background...${NC}"
+	@go run main.go --all --namespace=test-ns-1 > watcher-output.log 2>&1 & \
+	WATCHER_PID=$$!; \
+	echo "Watcher started with PID: $$WATCHER_PID"; \
+	sleep 5; \
+	./scripts/run_e2e_test.sh $$WATCHER_PID

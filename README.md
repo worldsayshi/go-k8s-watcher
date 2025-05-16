@@ -1,8 +1,19 @@
 # go-k8s-watch
 
-A simple proof-of-concept Kubernetes resource watcher that monitors changes to resources in a cluster.
+A simple proof-of-concept Kubernetes resource watcher that monitors changes to resources i## Makefile Targets
 
-## Features
+The Makefile provides the following targets:
+
+- `help`: Show help message with available targets
+- `prereqs`: Check for required tools (kind, kubectl, go)
+- `create-cluster`: Create a Kind cluster for testing
+- `resources`: Create test resources in the cluster
+- `modify`: Modify resources to trigger watch events
+- `examples`: Show example commands
+- `cleanup`: Delete the Kind cluster
+- `start-watcher`: Start the Kubernetes resource watcher
+- `test-only`: Run test sequence (resources & modify) without starting watcher
+- `e2e-test`: Run a complete end-to-end test with automatic watcher start/stop## Features
 
 - Watch any Kubernetes resource type (built-in or custom)
 - Monitor specific namespaces or all namespaces
@@ -28,7 +39,10 @@ make help
 # Create a Kind cluster and prepare environment
 make create-cluster
 
-# Create test resources
+# Start the watcher in a background process
+make start-watcher
+
+# Create test resources in a separate terminal
 make resources
 
 # Modify resources to generate events
@@ -38,7 +52,31 @@ make modify
 make cleanup
 ```
 
-### Run an end-to-end test
+### Testing Workflows
+
+You can run tests in several ways:
+
+#### Manual Testing (Separate Terminals)
+
+Terminal 1:
+```bash
+# Create cluster
+make create-cluster
+
+# Start the watcher (this will run in the foreground)
+make start-watcher
+```
+
+Terminal 2:
+```bash
+# Create and modify resources
+make test-only
+
+# Clean up when done
+make cleanup
+```
+
+#### Automatic End-to-End Test
 
 Run a complete end-to-end test that creates a cluster, runs the watcher, creates and modifies resources without interaction:
 
@@ -88,7 +126,9 @@ The Makefile provides the following targets:
 - `modify`: Modify resources to trigger watch events
 - `examples`: Show example commands
 - `cleanup`: Delete the Kind cluster
-- `e2e-test`: Run a complete end-to-end test without user interaction
+- `start-watcher`: Start the Kubernetes resource watcher in the background
+- `test-only`: Run test sequence (resources & modify) without starting watcher
+- `e2e-test`: Run a complete end-to-end test with automatic watcher start/stop
 
 ## Requirements
 
