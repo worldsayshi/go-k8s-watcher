@@ -202,7 +202,7 @@ func (w *K8sWatcher) discoverAllResources() ([]ResourceToWatch, error) {
 
 			processedResources[resourceKey] = true
 
-			group, version := splitAPIVersion(resList.GroupVersion)
+			group, version := SplitAPIVersion(resList.GroupVersion)
 			apiVersion := resList.GroupVersion
 			if group == "" {
 				apiVersion = version // core API has no group prefix
@@ -226,7 +226,7 @@ func (w *K8sWatcher) startResourceWatcher(
 	namespace string,
 	handler EventHandler,
 ) {
-	group, version := splitAPIVersion(resource.APIVersion)
+	group, version := SplitAPIVersion(resource.APIVersion)
 
 	// Create GroupVersionResource
 	gvr := schema.GroupVersionResource{

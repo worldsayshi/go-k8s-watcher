@@ -1,16 +1,4 @@
-# Makefile.PHONY: help
-help:
-	@echo "Available targets:"
-	@echo "  help           - Show this help message"
-	@echo "  prereqs        - Check prerequisites"
-	@echo "  create-cluster - Create Kind cluster for testing"
-	@echo "  resources      - Create test resources in the cluster"
-	@echo "  modify         - Modify resources to trigger events"
-	@echo "  examples       - Show example commands"
-	@echo "  cleanup        - Delete the Kind cluster"
-	@echo "  start-watcher  - Start the Kubernetes resource watcher"
-	@echo "  test-only      - Run test sequence (resources & modify) without starting watcher"
-	@echo "  e2e-test       - Run end-to-end test with automatic watcher start/stop"-watcher
+# Makefile for go-k8s-watcher
 # Organizes functionality using external scripts and manifests
 
 # Colors for better output
@@ -27,10 +15,12 @@ help:
 	@echo "  prereqs        - Check prerequisites"
 	@echo "  create-cluster - Create Kind cluster for testing"
 	@echo "  resources      - Create test resources in the cluster"
-	@echo "  modify         - Modify resources to trigger watch events"
+	@echo "  modify         - Modify resources to trigger events"
 	@echo "  examples       - Show example commands"
 	@echo "  cleanup        - Delete the Kind cluster"
-	@echo "  e2e-test       - Run end-to-end test without interruptions"
+	@echo "  start-watcher  - Start the Kubernetes resource watcher"
+	@echo "  test-only      - Run test sequence (resources & modify) without starting watcher"
+	@echo "  e2e-test       - Run end-to-end test with automatic watcher start/stop"
 
 .PHONY: prereqs
 prereqs:
