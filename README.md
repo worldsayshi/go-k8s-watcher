@@ -1,6 +1,8 @@
-# go-k8s-watch
+# go-k8s-watcher
 
-A simple proof-of-concept Kubernetes resource watcher that monitors changes to resources i## Makefile Targets
+A Kubernetes resource watcher with both command-line and TUI interfaces that monitors changes to resources in a Kubernetes cluster.
+
+## Makefile Targets
 
 The Makefile provides the following targets:
 
@@ -12,6 +14,8 @@ The Makefile provides the following targets:
 - `examples`: Show example commands
 - `cleanup`: Delete the Kind cluster
 - `start-watcher`: Start the Kubernetes resource watcher
+- `start-tui`: Start the TUI application for resource viewing
+- `build`: Build both commands (watcher and TUI)
 - `test-only`: Run test sequence (resources & modify) without starting watcher
 - `e2e-test`: Run a complete end-to-end test with automatic watcher start/stop## Features
 
@@ -19,12 +23,20 @@ The Makefile provides the following targets:
 - Monitor specific namespaces or all namespaces
 - Detect when resources are added, modified, or deleted
 - Automatically reconnect if connection is lost
+- Interactive TUI interface for searching and viewing resources
+- SQLite database for persistent resource storage
 
 ## Project Structure
 
+- `/cmd` - Command-line applications
+  - `/cmd/watcher` - Command-line watcher tool
+  - `/cmd/tui` - Terminal user interface application
 - `/manifests` - Kubernetes YAML manifests for testing
+- `/pkg` - Go packages
+  - `/pkg/watcher` - Kubernetes resource watching implementation
+  - `/pkg/db` - SQLite database for resource storage
+  - `/pkg/ui` - TUI components using bubbletea
 - `/scripts` - Helper bash scripts for managing test environment
-- `/pkg` - Go packages for the watcher implementation
 
 ## Usage
 
@@ -42,6 +54,9 @@ make create-cluster
 # Start the watcher in a background process
 make start-watcher
 
+# Start the TUI application
+make start-tui
+
 # Create test resources in a separate terminal
 make resources
 
@@ -49,6 +64,36 @@ make resources
 make modify
 
 # Clean up when finished
+make cleanup
+```
+
+### Command-Line Tools
+
+#### Resource Watcher
+
+```bash
+# Build the commands
+make build
+
+# Run the watcher directly
+./bin/watcher --all --namespace=default
+```
+
+#### TUI Application
+
+```bash
+# Build the commands
+make build
+
+# Run the TUI application
+./bin/tui
+
+# With custom kubeconfig
+./bin/tui --kubeconfig=/path/to/kubeconfig
+
+# With custom database path
+./bin/tui --db=/path/to/database.db
+```
 make cleanup
 ```
 

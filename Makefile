@@ -19,6 +19,8 @@ help:
 	@echo "  examples       - Show example commands"
 	@echo "  cleanup        - Delete the Kind cluster"
 	@echo "  start-watcher  - Start the Kubernetes resource watcher"
+	@echo "  start-tui      - Start the Kubernetes resource TUI"
+	@echo "  build          - Build both commands"
 	@echo "  test-only      - Run test sequence (resources & modify) without starting watcher"
 	@echo "  e2e-test       - Run end-to-end test with automatic watcher start/stop"
 
@@ -57,7 +59,24 @@ cleanup:
 start-watcher:
 	@echo -e "${BLUE}========== Starting Resource Watcher ==========${NC}\n"
 	@echo -e "${YELLOW}Starting the resource watcher for namespace: test-ns-1${NC}"
-	@go run main.go --all --namespace=test-ns-1
+	@go run cmd/watcher/main.go --all --namespace=test-ns-1
+
+# Start the TUI application
+.PHONY: start-tui
+start-tui:
+	@echo -e "${BLUE}========== Starting Resource TUI ==========${NC}\n"
+	@echo -e "${YELLOW}Starting the resource TUI viewer${NC}"
+	@LOG_PATH="/tmp/k8s-tui.log" && \
+	echo -e "${GREEN}Logs will be written to: $${LOG_PATH}${NC}" && \
+	go run cmd/tui/main.go --log="$${LOG_PATH}"
+
+# Build both commands
+.PHONY: build
+build:
+	@echo -e "${BLUE}========== Building Commands ==========${NC}\n"
+	@go build -o bin/watcher cmd/watcher/main.go
+	@go build -o bin/tui cmd/tui/main.go
+	@echo -e "${GREEN}✓ Built commands in bin/ directory${NC}"
 
 # Run test sequence without starting watcher
 .PHONY: test-only
@@ -70,7 +89,7 @@ test-only: create-cluster
 e2e-test: create-cluster
 	@echo -e "${BLUE}========== Running End-to-End Test with Watcher ==========${NC}\n"
 	@echo -e "${YELLOW}Starting the resource watcher in background...${NC}"
-	@go run main.go --all --namespace=test-ns-1 > watcher-output.log 2>&1 & \
+	@go run cmd/watcher/main.go --all --namespace=test-ns-1 > watcher-output.log 2>&1 & \
 	WATCHER_PID=$$!; \
 	echo "Watcher started with PID: $$WATCHER_PID"; \
 	sleep 5; \
